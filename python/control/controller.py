@@ -1,16 +1,37 @@
+import math
 import threading
+from enum import Enum
 
+import numpy as np
 from arduino.app_utils import Bridge
 
 from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
 VCONS = 0.25 # velocidad lineal de los motores (unit? probably rev/s)
-EPSILON = 1 # visual error in pixels admited
+EPSILON = 4 # error visual admitido en pixeles (~0.8 grados con 320 px y 60 de FOV; holgura frente al ruido de la camara)
 MIN_VISUAL_TRACK_ITER = 15 # iterations of the visual controller to consider it successful and launch transition POKED
 WANDER_THETA = -0.1 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
 
 MAX_WHEEL_REF = 2 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
+
+
+class ControllerType(str, Enum):
+    PD = 'PD'   # PD sobre el error visual en pixeles
+    LQR = 'LQR' # LQR sobre el modelo lineal en espacio de estados del robot diferencial
+
+
+CONTROLLER_TYPE = ControllerType.PD # controlador usado en APPROACH
+
+# Camara: pasar el error en pixeles a angulo de rumbo hacia el globo
+IMAGE_WIDTH_PX = 320    # ancho del frame procesado (vision.PROCESS_SIZE)
+CAMERA_HFOV_DEG = 60.0  # campo de vision horizontal de la Logitech 720p (a medir)
+
+# Parametros fisicos del robot para el modelo LQR (a identificar en el robot real)
+WHEEL_RADIUS = 0.035      # m
+TRACK_WIDTH = 0.15        # m, distancia entre las ruedas motrices
+WHEEL_TIME_CONSTANT = 0.15 # s, respuesta de primer orden motor + inercia + rozamiento (incluye la rueda loca)
+WHEEL_SPEED_GAIN = 2 * math.pi * WHEEL_RADIUS # m/s de rueda por unidad de referencia (referencias en rev/s)
 
 # Nombres de las funciones RPC del Bridge (deben coincidir con sketch/config.h)
 BRIDGE_SET_WHEELS = 'set_wheels'        # Python -> MCU: (left: int, right: int) en % [-100, 100]
@@ -41,11 +62,144 @@ class PDControllerParams():
         self.kd = kd
 
 
+def solve_dare(A, B, Q, R, max_iter=10000, tol=1e-10):
+    """Resuelve la ecuacion algebraica de Riccati discreta por iteracion. Devuelve P."""
+    P = Q.copy()
+    for _ in range(max_iter):
+        K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+        P_next = Q + A.T @ P @ (A - B @ K)
+        if np.max(np.abs(P_next - P)) < tol:
+            return P_next
+        P = P_next
+    raise RuntimeError('La ecuacion de Riccati no converge')
+
+
+def discretize_zoh(A, B, dt, terms=20):
+    """Discretizacion exacta con retenedor de orden cero: exp([[A, B], [0, 0]] * dt)."""
+    n, m = B.shape
+    M = np.zeros((n + m, n + m))
+    M[:n, :n] = A
+    M[:n, n:] = B
+    M *= dt
+    # serie de Taylor con escalado y cuadrado para la exponencial de la matriz
+    squarings = max(0, int(np.ceil(np.log2(max(np.linalg.norm(M, np.inf), 1e-12)))) + 1)
+    M /= 2 ** squarings
+    expm = np.eye(n + m)
+    term = np.eye(n + m)
+    for k in range(1, terms):
+        term = term @ M / k
+        expm = expm + term
+    for _ in range(squarings):
+        expm = expm @ expm
+    return expm[:n, :n], expm[:n, n:]
+
+
+class DifferentialDriveModel():
+    """Modelo dinamico lineal en espacio de estados de un robot diferencial con rueda loca.
+
+    Estado x = [phi, omega, v]:
+        phi   rumbo del globo respecto al eje del robot (rad, positivo = a la izquierda)
+        omega velocidad angular del robot (rad/s, positivo = antihorario)
+        v     velocidad lineal del robot (m/s)
+    Entrada u = [u_izq, u_der]: referencias de rueda (mismas unidades que VCONS).
+    Salida y = phi, medida por la camara.
+
+    Cada rueda motriz responde como un sistema de primer orden: tau * dv_i/dt = -v_i + k * u_i.
+    La rueda loca no impone restriccion cinematica; su rozamiento se incluye en tau. Con
+    omega = (v_der - v_izq) / L y v = (v_der + v_izq) / 2, y suponiendo el globo estatico y
+    lejano (dphi/dt = -omega), el modelo continuo es:
+
+        dphi/dt   = -omega
+        domega/dt = -omega / tau + k / (L * tau) * (u_der - u_izq)
+        dv/dt     = -v / tau     + k / (2 * tau) * (u_der + u_izq)
+    """
+
+    def __init__(self, wheel_speed_gain=WHEEL_SPEED_GAIN, track_width=TRACK_WIDTH,
+                 time_constant=WHEEL_TIME_CONSTANT):
+        k, L, tau = wheel_speed_gain, track_width, time_constant
+        self.k = k
+        self.A = np.array([
+            [0.0, -1.0, 0.0],
+            [0.0, -1.0 / tau, 0.0],
+            [0.0, 0.0, -1.0 / tau],
+        ])
+        self.B = np.array([
+            [0.0, 0.0],
+            [-k / (L * tau), k / (L * tau)],
+            [k / (2 * tau), k / (2 * tau)],
+        ])
+        self.C = np.array([[1.0, 0.0, 0.0]])
+
+    def discretize(self, frequency):
+        return discretize_zoh(self.A, self.B, 1.0 / frequency)
+
+    def equilibrium(self, wheel_ref):
+        """Punto de equilibrio avanzando recto hacia el globo con ambas ruedas a wheel_ref."""
+        x_eq = np.array([0.0, 0.0, self.k * wheel_ref])
+        u_eq = np.array([wheel_ref, wheel_ref])
+        return x_eq, u_eq
+
+
+class LQRController():
+    """LQR discreto en torno al equilibrio (avanzar recto a VCONS con el globo centrado).
+
+    u = u_eq - K (x_est - x_eq), con K de la ecuacion de Riccati discreta. Solo se mide phi,
+    asi que omega y v se estiman con un observador de Kalman estacionario sobre el mismo modelo.
+    Pesos por la regla de Bryson: 1 / (valor maximo admisible)^2.
+    """
+
+    def __init__(self, frequency, model=None, max_phi=math.radians(3), max_omega=1.0, max_v_error=0.05,
+                 max_wheel_delta=VCONS, process_noise=(1e-4, 1e-2, 1e-3), measurement_noise=math.radians(1) ** 2):
+        self.model = model if model is not None else DifferentialDriveModel()
+        self.Ad, self.Bd = self.model.discretize(frequency)
+        C = self.model.C
+
+        Q = np.diag([1 / max_phi ** 2, 1 / max_omega ** 2, 1 / max_v_error ** 2])
+        R = np.diag([1 / max_wheel_delta ** 2] * 2)
+        P = solve_dare(self.Ad, self.Bd, Q, R)
+        self.K = np.linalg.solve(R + self.Bd.T @ P @ self.Bd, self.Bd.T @ P @ self.Ad)
+
+        # observador: Riccati dual (covarianza de prediccion) -> ganancia de correccion
+        Qn = np.diag(process_noise)
+        Rn = np.array([[measurement_noise]])
+        S = solve_dare(self.Ad.T, C.T, Qn, Rn)
+        self.M = S @ C.T @ np.linalg.inv(C @ S @ C.T + Rn)
+        self.C = C
+
+        self.x_eq, self.u_eq = self.model.equilibrium(VCONS)
+        self.f_px = (IMAGE_WIDTH_PX / 2) / math.tan(math.radians(CAMERA_HFOV_DEG) / 2)
+        self.x_pred = None
+
+    def reset(self):
+        self.x_pred = None
+
+    def pixel_error_to_bearing(self, error_px):
+        """Error visual (width/2 - cx, positivo = globo a la izquierda) -> rumbo phi en rad."""
+        return math.atan2(error_px, self.f_px)
+
+    def compute(self, error_px, saturate):
+        """Calcula las referencias de rueda (izq, der) a partir del error visual en pixeles."""
+        phi = self.pixel_error_to_bearing(error_px)
+        if self.x_pred is None:
+            self.x_pred = np.array([phi, 0.0, 0.0])
+
+        # correccion con la medida de la camara
+        x_est = self.x_pred + self.M @ (np.array([phi]) - self.C @ self.x_pred)
+        u = self.u_eq - self.K @ (x_est - self.x_eq)
+        u = np.array([saturate(u[0]), saturate(u[1])])
+
+        # prediccion con la entrada realmente aplicada (tras saturar)
+        self.x_pred = self.Ad @ x_est + self.Bd @ u
+        return float(u[0]), float(u[1])
+
+
 class Controller():
-    def __init__(self, goal1, goal2, frequency):
+    def __init__(self, goal1, goal2, frequency, controller_type=CONTROLLER_TYPE):
+        self.controller_type = ControllerType(controller_type)
         # PD controller gains
         self.steering_gains = PDControllerParams(kp=0.001, kd=0.0005, is_steering=True)
         self.lineal_gains = PDControllerParams(kp=1.0, kd=0.1, is_steering=False)
+        self.lqr = LQRController(frequency) if self.controller_type == ControllerType.LQR else None
 
         self.error = None
         self.previous_error = 0.0
@@ -73,6 +227,8 @@ class Controller():
                 self.transition_poked_sent = False
                 self.previous_error = None # evita el pico de la derivada en la primera muestra
                 self.error = None
+                if self.lqr is not None:
+                    self.lqr.reset()
             return changed
 
     def get_state(self):
@@ -179,8 +335,19 @@ class Controller():
     def _approach_tau(self):
         # si hay obstaculo de momento se fija a 0, esa logica se implementa a futuro
         if self.there_is_obstacle or self.error is None:
+            if self.lqr is not None:
+                self.lqr.reset()
             return {"left": 0.0, "right": 0.0}
 
+        if self.controller_type == ControllerType.LQR:
+            return self._lqr_tau()
+        return self._pd_tau()
+
+    def _lqr_tau(self):
+        left, right = self.lqr.compute(self.error, self._clamp)
+        return {"left": left, "right": right}
+
+    def _pd_tau(self):
         previous = self.error if self.previous_error is None else self.previous_error
         derivative = (self.error - previous) * self.fsm.get_frequency()
         # el error de vision ya es referencia - medida (width/2 - cx, positivo = globo a la izquierda),

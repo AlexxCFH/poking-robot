@@ -113,7 +113,10 @@ Cada ciclo: captura un frame → detecta el globo del color objetivo actual → 
 |---|---|
 | IDLE, AVOID | 0, 0 |
 | WANDER | giro sobre sí mismo (`WANDER_THETA`) |
-| APPROACH | `VCONS ∓ u` con `u = Kp·e + Kd·de/dt` (limitado a `[0, 2·VCONS]`) |
+| APPROACH | según `CONTROLLER_TYPE`: **PD** `VCONS ∓ u` con `u = Kp·e + Kd·de/dt`, o **LQR** (ver abajo); limitado a `[0, 2·VCONS]` |
+
+- **Tipo de controlador**: `CONTROLLER_TYPE` en controller.py (`ControllerType.PD` por defecto, o `ControllerType.LQR`), o el argumento `controller_type` de `Controller`.
+- **LQR**: modelo lineal de robot diferencial con rueda loca, estado `x = [φ, ω, v]` (rumbo al globo, velocidad angular, velocidad lineal) y entradas `[u_izq, u_der]`; cada rueda es un primer orden de constante `WHEEL_TIME_CONSTANT` y el rozamiento de la rueda loca va incluido en ella. Se discretiza (ZOH) a `FREQUENCY`, la ganancia sale de la ecuación de Riccati discreta (pesos por la regla de Bryson) y `ω`, `v` se estiman con un observador de Kalman estacionario porque solo se mide `φ = atan(e / f_px)`. Los parámetros físicos (`WHEEL_RADIUS`, `TRACK_WIDTH`, `WHEEL_TIME_CONSTANT`, `CAMERA_HFOV_DEG`) son estimaciones a medir en el robot.
 
 - **Error visual** `e = ancho/2 − cx` en píxeles del frame reducido (320 px): positivo = globo a la izquierda → `u > 0` acelera la rueda derecha y el robot gira a la izquierda.
 - Las referencias se envían al MCU en **% de PWM** (`2·VCONS` = 100 %).
@@ -157,7 +160,7 @@ Con el robot en reposo, escribir en el Monitor:
 |---|---|---|---|
 | `VCONS`, `WANDER_THETA` | controller.py | 0.25 (50 % PWM), -0.1 (20 % PWM) | comprobar con el test de motores que el 20 % mueve las ruedas |
 | `steering_gains` (Kp, Kd) | controller.py | 0.001, 0.0005 | Kd domina cuando el error cambia rápido |
-| `EPSILON`, `MIN_VISUAL_TRACK_ITER` | controller.py | 1 px, 15 ciclos | criterio de `POKED` |
+| `EPSILON`, `MIN_VISUAL_TRACK_ITER` | controller.py | 4 px, 15 ciclos | criterio de `POKED` |
 | `FREQUENCY` | main.py | 20 Hz | debe coincidir con `FRECUENCIA_SISTEMA_HZ` de config.h |
 | `COLOR_RANGES`, `ROI_BOTTOM` | vision.py | — | recalibrar con la luz del recinto |
 | `MOTOR_IZQ/DER.adelanteEsHigh` | config.h | true / false | invertir si una rueda gira al revés |
