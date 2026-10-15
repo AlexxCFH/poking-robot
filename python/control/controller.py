@@ -3,12 +3,16 @@ import time
 
 from arduino.app_utils import Bridge
 
+from vision.vision import PopCounter
+
 from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
 VCONS = 8.00 # velocidad lineal de los motores (unit? probably rev/s)
-EPSILON = 4 # visual error in pixels admited
-MIN_VISUAL_TRACK_ITER = 15 # iterations of the visual controller to consider it successful and launch transition POKED
+EPSILON = 4 # zona muerta del error visual (px): por debajo se va recto
+ERROR_FILTER_ALPHA = 0.5 # filtro paso bajo del error visual (1 = sin filtro); quita el ruido del centroide
+MAX_STEERING = 0.6 * VCONS # saturacion de la ley de control para no bloquear una rueda
+LOST_FRAMES_TO_WANDER = 10 # frames seguidos sin ver el globo en APPROACH para volver a buscar (0.5 s a 20 Hz)
 WANDER_THETA = 7.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
 
 PRINT_PERIOD_S = 0.5 # segundos entre prints de la deteccion de la camara
@@ -47,14 +51,16 @@ class PDControllerParams():
 class Controller():
     def __init__(self, goal1, goal2, frequency):
         # PD controller gains
-        self.steering_gains = PDControllerParams(kp=0.1, kd=0.05, is_steering=True)
+        # kd multiplica a la derivada en px/s (diferencia * frecuencia): 0.002 * 20 Hz = 0.04 por px de cambio entre frames
+        self.steering_gains = PDControllerParams(kp=0.04, kd=0.002, is_steering=True)
         self.lineal_gains = PDControllerParams(kp=1.0, kd=0.0, is_steering=False)
 
         self.error = None
-        self.previous_error = 0.0
-        self.controller_consecutive_actions_sent = 0 # detectar si ha conseguido minimizar el error visual
+        self.previous_error = None
         self.fsm = FiniteStateMachine(goal1, goal2, frequency)
-        self.transition_poked_sent = False  # Flag para evitar publicar múltiples transiciones
+        self.pop_counter = PopCounter() # detecta el pinchazo: el globo desaparece cerca y de frente
+        self.lost_frames = 0 # frames seguidos sin ver el globo en APPROACH
+        self._last_tau = {"left": 0.0, "right": 0.0}
         self.there_is_obstacle = False # la presencia de un robot se considera obstaculo
         self.goals_ack_pending = False # hay que confirmar al MCU los colores recibidos
         self._last_print = 0.0 # instante del ultimo print de la camara
@@ -73,8 +79,8 @@ class Controller():
         with self._lock:
             changed = self.fsm.update_state(transition)
             if changed and self.fsm.get_current_state() in (State.APPROACH, State.IDLE):
-                self.controller_consecutive_actions_sent = 0
-                self.transition_poked_sent = False
+                self.pop_counter.reset()
+                self.lost_frames = 0
                 self.previous_error = None # evita el pico de la derivada en la primera muestra
                 self.error = None
             if changed and self.fsm.get_current_state() == State.IDLE:
@@ -90,17 +96,32 @@ class Controller():
             return self.fsm.get_goal()
 
     def error_callback(self, msg):
-        """Actualiza el error visual (px). None si no se ve el globo objetivo."""
-        self.error = None if msg is None else float(msg)
+        """Actualiza el error visual (px) filtrado. None si no se ve el globo objetivo."""
+        if msg is None:
+            self.error = None
+            return
+        raw = float(msg)
+        last = self.error if self.error is not None else self.previous_error
+        # filtro paso bajo: si no hay muestra anterior se toma la medida tal cual
+        self.error = raw if last is None else ERROR_FILTER_ALPHA * raw + (1 - ERROR_FILTER_ALPHA) * last
 
     def vision_callback(self, detection):
         """Recibe la Detection de vision (vision.BalloonDetector) del globo del color objetivo.
 
         En WANDER, ver el globo lanza DETECTED_TARGET. La transicion se aplica antes de actualizar
         el error porque al entrar en APPROACH se resetea el estado del controlador visual.
+        En APPROACH, si el globo desaparece estando cerca y de frente se lanza POKED; si se pierde
+        de otra forma durante LOST_FRAMES_TO_WANDER frames se lanza TARGET_LOST y se vuelve a buscar.
         """
-        if detection.found and self.get_state() == State.WANDER:
+        state = self.get_state()
+        if detection.found and state == State.WANDER:
             self._apply_transition(Transition.DETECTED_TARGET)
+        elif state == State.APPROACH:
+            self.lost_frames = 0 if detection.found else self.lost_frames + 1
+            if self.pop_counter.update(detection):
+                self._apply_transition(Transition.POKED)
+            elif self.lost_frames >= LOST_FRAMES_TO_WANDER:
+                self._apply_transition(Transition.TARGET_LOST)
         self.error_callback(detection.error if detection.found else None)
         self._print_detection(detection)
         Bridge.notify(BRIDGE_DETECTION, int(detection.error) if detection.found else 0, bool(detection.found))
@@ -156,17 +177,6 @@ class Controller():
             self.there_is_obstacle = False
             self._apply_transition(Transition.CLEAR_PATH)
 
-    def send_poked_transition(self):
-        """Si se cumplen el minimo de acciones consecutivas con error dentro de EPSILON se lanza la transicion POKED."""
-        if self.error is not None and abs(self.error) <= EPSILON:
-            self.controller_consecutive_actions_sent += 1
-        else:
-            self.controller_consecutive_actions_sent = 0
-
-        if self.controller_consecutive_actions_sent >= MIN_VISUAL_TRACK_ITER and not self.transition_poked_sent:
-            self.transition_poked_sent = True
-            self._apply_transition(Transition.POKED)
-
     def send_obstacle_transition(self):
         """Callback para la detección de obstáculos: se envia transicion de ROBOT_PRESENCE"""
         self.there_is_obstacle = True
@@ -205,14 +215,20 @@ class Controller():
 
     def _approach_tau(self):
         # si hay obstaculo de momento se fija a 0, esa logica se implementa a futuro
-        if self.there_is_obstacle or self.error is None:
+        if self.there_is_obstacle:
             return {"left": 0.0, "right": 0.0}
+        if self.error is None:
+            # globo perdido unos frames (reflejo, o ya encima para pincharlo): se mantiene la ultima
+            # orden hasta que vision_callback decida POKED o TARGET_LOST
+            return self._last_tau
 
         previous = self.error if self.previous_error is None else self.previous_error
         derivative = (self.error - previous) * self.fsm.get_frequency()
         # el error de vision ya es referencia - medida (width/2 - cx, positivo = globo a la izquierda),
         # por lo que no hace falta invertir el signo de la ley de control
-        control_law = (self.steering_gains.getKp() * self.error) + (self.steering_gains.getKd() * derivative)
+        error = 0.0 if abs(self.error) <= EPSILON else self.error
+        control_law = (self.steering_gains.getKp() * error) + (self.steering_gains.getKd() * derivative)
+        control_law = max(-MAX_STEERING, min(MAX_STEERING, control_law))
 
         # velocidad diferencial: control_law > 0 acelera la rueda derecha y gira a la izquierda (antihorario)
         return {
@@ -229,11 +245,11 @@ class Controller():
             tau = self._wander_tau()
         elif state == State.APPROACH:
             tau = self._approach_tau()
-            self.send_poked_transition()
         else: # IDLE, AVOID (avoid state to be implemented)
             tau = {"left": 0.0, "right": 0.0}
 
         self.send_bridge(tau)
+        self._last_tau = tau
 
         if self.error is not None:
             self.previous_error = self.error
