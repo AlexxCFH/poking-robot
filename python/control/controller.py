@@ -17,7 +17,7 @@ WANDER_THETA = 7.00 # velocidad de giro sobre si mismo en WANDER (negativo = hor
 
 PRINT_PERIOD_S = 0.5 # segundos entre prints de la deteccion de la camara
 
-MAX_WHEEL_REF = 1.1 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
+MAX_WHEEL_REF = 1.2 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
 
 # Nombres de las funciones RPC del Bridge (deben coincidir con sketch/config.h)
 BRIDGE_SET_WHEELS = 'set_wheels'        # Python -> MCU: (left: int, right: int) en % [-100, 100]
