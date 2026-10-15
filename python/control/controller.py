@@ -3,13 +3,19 @@ import time
 
 from arduino.app_utils import Bridge
 
-from vision.vision import PopCounter
+from vision.vision import POP_MIN_AREA
 
 from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
 VCONS = 8.00 # velocidad lineal de los motores (unit? probably rev/s)
-EPSILON = 4 # zona muerta del error visual (px): por debajo se va recto
+EPSILON = 4 # error visual (px) por debajo del cual el globo se considera fijado (centrado)
+STEERING_DEADBAND = 2 # zona muerta del error (px): por debajo se va recto; menor que EPSILON para converger dentro
+# criterio de POKED: el objetivo es estatico, asi que si un contorno grande y fijado desaparece de golpe
+# es que se ha pinchado
+POKE_MIN_AREA = POP_MIN_AREA # area (px del frame reducido) a partir de la que el contorno se considera grande
+MIN_LOCKED_FRAMES = 3 # frames seguidos con el contorno grande y |error| <= EPSILON para darlo por fijado
+POKED_LOST_FRAMES = 2 # frames seguidos sin contorno tras estar fijado para lanzar POKED (filtra parpadeos de 1 frame)
 ERROR_FILTER_ALPHA = 0.5 # filtro paso bajo del error visual (1 = sin filtro); quita el ruido del centroide
 MAX_STEERING = 0.6 * VCONS # saturacion de la ley de control para no bloquear una rueda
 LOST_FRAMES_TO_WANDER = 10 # frames seguidos sin ver el globo en APPROACH para volver a buscar (0.5 s a 20 Hz)
@@ -58,7 +64,7 @@ class Controller():
         self.error = None
         self.previous_error = None
         self.fsm = FiniteStateMachine(goal1, goal2, frequency)
-        self.pop_counter = PopCounter() # detecta el pinchazo: el globo desaparece cerca y de frente
+        self.locked_frames = 0 # frames seguidos con el contorno objetivo grande y centrado (fijado)
         self.lost_frames = 0 # frames seguidos sin ver el globo en APPROACH
         self._last_tau = {"left": 0.0, "right": 0.0}
         self.there_is_obstacle = False # la presencia de un robot se considera obstaculo
@@ -79,7 +85,7 @@ class Controller():
         with self._lock:
             changed = self.fsm.update_state(transition)
             if changed and self.fsm.get_current_state() in (State.APPROACH, State.IDLE):
-                self.pop_counter.reset()
+                self.locked_frames = 0
                 self.lost_frames = 0
                 self.previous_error = None # evita el pico de la derivada en la primera muestra
                 self.error = None
@@ -110,21 +116,38 @@ class Controller():
 
         En WANDER, ver el globo lanza DETECTED_TARGET. La transicion se aplica antes de actualizar
         el error porque al entrar en APPROACH se resetea el estado del controlador visual.
-        En APPROACH, si el globo desaparece estando cerca y de frente se lanza POKED; si se pierde
-        de otra forma durante LOST_FRAMES_TO_WANDER frames se lanza TARGET_LOST y se vuelve a buscar.
+        En APPROACH el error se actualiza antes de comprobar si el objetivo sigue fijado (check_target).
         """
         state = self.get_state()
         if detection.found and state == State.WANDER:
             self._apply_transition(Transition.DETECTED_TARGET)
-        elif state == State.APPROACH:
-            self.lost_frames = 0 if detection.found else self.lost_frames + 1
-            if self.pop_counter.update(detection):
-                self._apply_transition(Transition.POKED)
-            elif self.lost_frames >= LOST_FRAMES_TO_WANDER:
-                self._apply_transition(Transition.TARGET_LOST)
         self.error_callback(detection.error if detection.found else None)
+        if state == State.APPROACH:
+            self.check_target(detection)
         self._print_detection(detection)
         Bridge.notify(BRIDGE_DETECTION, int(detection.error) if detection.found else 0, bool(detection.found))
+
+    def check_target(self, detection):
+        """Decide en APPROACH si el globo se ha pinchado (POKED) o se ha perdido (TARGET_LOST).
+
+        El contorno queda fijado si durante MIN_LOCKED_FRAMES frames seguidos es grande (area >= POKE_MIN_AREA)
+        y esta centrado (|error| <= EPSILON). Como el objetivo es estatico, si un contorno fijado desaparece de
+        golpe (POKED_LOST_FRAMES frames sin verlo) se da por pinchado. Si desaparece sin estar fijado (lejos o
+        descentrado) durante LOST_FRAMES_TO_WANDER frames se vuelve a buscar.
+        """
+        if detection.found:
+            self.lost_frames = 0
+            locked = detection.area >= POKE_MIN_AREA and abs(self.error) <= EPSILON
+            self.locked_frames = self.locked_frames + 1 if locked else 0
+            return
+
+        self.lost_frames += 1
+        if self.locked_frames >= MIN_LOCKED_FRAMES and self.lost_frames >= POKED_LOST_FRAMES:
+            print('objetivo pinchado: el contorno fijado ha desaparecido')
+            self._apply_transition(Transition.POKED)
+        elif self.lost_frames >= LOST_FRAMES_TO_WANDER:
+            print('objetivo perdido: se vuelve a buscar')
+            self._apply_transition(Transition.TARGET_LOST)
 
     def _print_detection(self, detection):
         """Imprime el error visual (px) y en que mitad de la imagen esta el centroide, como mucho cada PRINT_PERIOD_S."""
@@ -198,7 +221,7 @@ class Controller():
         return int(round(max(-1.0, min(1.0, reference / MAX_WHEEL_REF)) * 100))
 
     @staticmethod
-    def _clamp(value, low=0.0, high=2 * VCONS):
+    def _clamp(value, low=0.0, high=1.2 * VCONS):
         return max(low, min(high, value))
 
     def _wander_tau(self):
@@ -227,7 +250,7 @@ class Controller():
         derivative = (self.error - previous) * self.fsm.get_frequency()
         # el error de vision ya es referencia - medida (width/2 - cx, positivo = globo a la izquierda),
         # por lo que no hace falta invertir el signo de la ley de control
-        error = 0.0 if abs(self.error) <= EPSILON else self.error
+        error = 0.0 if abs(self.error) <= STEERING_DEADBAND else self.error
         control_law = (self.steering_gains.getKp() * error) + (self.steering_gains.getKd() * derivative)
         control_law = max(-MAX_STEERING, min(MAX_STEERING, control_law))
 
