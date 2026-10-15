@@ -101,7 +101,8 @@ P2/P3 en cualquier estado salvo EN_MARCHA ──► cambia color ──► SINCR
 | IDLE | `START` | WANDER | MCU, tras la cuenta atrás |
 | WANDER | `DETECTED_TARGET` | APPROACH | visión: se ve el globo del color objetivo |
 | WANDER / APPROACH | `ROBOT_PRESENCE` | AVOID | RPC `obstacle(True)` |
-| APPROACH | `POKED` | WANDER | controlador: globo centrado `MIN_VISUAL_TRACK_ITER` ciclos |
+| APPROACH | `POKED` | WANDER | controlador: un contorno grande y fijado (centrado `MIN_LOCKED_FRAMES` ciclos) desaparece de golpe |
+| APPROACH | `TARGET_LOST` | WANDER | controlador: el globo se pierde sin estar fijado durante `LOST_FRAMES_TO_WANDER` ciclos |
 | AVOID | `CLEAR_PATH` | WANDER | RPC `obstacle(False)` |
 | WANDER / APPROACH / AVOID | `RESET` | IDLE | MCU, al volver a reposo |
 
@@ -161,14 +162,14 @@ Con el robot en reposo, escribir en el Monitor:
 |---|---|---|---|
 | `VCONS`, `WANDER_THETA` | controller.py | 0.25 (50 % PWM), -0.1 (20 % PWM) | comprobar con el test de motores que el 20 % mueve las ruedas |
 | `steering_gains` (Kp, Kd) | controller.py | 0.001, 0.0005 | Kd domina cuando el error cambia rápido |
-| `EPSILON`, `MIN_VISUAL_TRACK_ITER` | controller.py | 1 px, 15 ciclos | criterio de `POKED` |
+| `EPSILON`, `POKE_MIN_AREA`, `MIN_LOCKED_FRAMES`, `POKED_LOST_FRAMES` | controller.py | 4 px, 1500 px², 3 y 2 ciclos | criterio de `POKED`: el objetivo es estático, así que si un contorno grande y centrado desaparece de golpe se da por pinchado |
+| `LOST_FRAMES_TO_WANDER` | controller.py | 10 ciclos | globo perdido sin estar fijado → `TARGET_LOST` |
 | `FREQUENCY` | main.py | 20 Hz | debe coincidir con `FRECUENCIA_SISTEMA_HZ` de config.h |
 | `COLOR_RANGES`, `ROI_BOTTOM` | vision.py | — | recalibrar con la luz del recinto |
 | `MOTOR_IZQ/DER.adelanteEsHigh` | config.h | true / false | invertir si una rueda gira al revés |
 
 ## Limitaciones conocidas
 
-- **Globo perdido en APPROACH**: si el globo desaparece (pinchado o fuera de imagen) antes de cumplirse el criterio de `POKED`, el robot se queda parado en APPROACH. Opciones: usar `PopCounter` de `vision.py` o añadir una transición `LOST_TARGET` → WANDER.
 - **Fin de partida**: según las reglas la partida acaba al pinchar los 3 globos propios, pero la FSM cambia al color final y sigue; pinchar globos rivales resta puntos.
 - **AVOID** no tiene comportamiento todavía y nadie envía `obstacle`.
 - Los rangos HSV y las ganancias no se han validado en el campo.
