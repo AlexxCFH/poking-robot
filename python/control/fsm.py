@@ -58,6 +58,7 @@ class FiniteStateMachine():
         self.num_baloons_poked = 0 # globos pinchados counter
 
         self.current_goal, self.next_goal = self._parse_goals(goal1, goal2)
+        self.initial_goal, self.final_goal = self.current_goal, self.next_goal # colores elegidos, para restaurarlos al volver a IDLE
 
     @staticmethod
     def _parse_goals(goal1, goal2):
@@ -74,6 +75,7 @@ class FiniteStateMachine():
             self.current_goal, self.next_goal = self._parse_goals(goal1, goal2)
         except ValueError:
             return False
+        self.initial_goal, self.final_goal = self.current_goal, self.next_goal
         return True
 
     def update_state(self, transition):
@@ -96,8 +98,13 @@ class FiniteStateMachine():
         if transition == Transition.POKED:
             self.baloon_poked()
         elif transition in (Transition.RESET, Transition.STOP):
-            self.baloon_poked(reset=True)
+            self.reset()
         return True
+
+    def reset(self):
+        """Vuelve a la situacion de partida: contador de globos a 0 y colores objetivo los elegidos (sin el intercambio de lotes)."""
+        self.baloon_poked(reset=True)
+        self.current_goal, self.next_goal = self.initial_goal, self.final_goal
 
     def _update_goal(self):
         # intercambia objetivo actual y siguiente para poder seguir alternando lotes

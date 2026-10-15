@@ -6,14 +6,14 @@ from arduino.app_utils import Bridge
 from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
-VCONS = 4.00 # velocidad lineal de los motores (unit? probably rev/s)
+VCONS = 8.00 # velocidad lineal de los motores (unit? probably rev/s)
 EPSILON = 4 # visual error in pixels admited
 MIN_VISUAL_TRACK_ITER = 15 # iterations of the visual controller to consider it successful and launch transition POKED
-WANDER_THETA = 5.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
+WANDER_THETA = 7.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
 
 PRINT_PERIOD_S = 0.5 # segundos entre prints de la deteccion de la camara
 
-MAX_WHEEL_REF = 2 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
+MAX_WHEEL_REF = 1.1 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
 
 # Nombres de las funciones RPC del Bridge (deben coincidir con sketch/config.h)
 BRIDGE_SET_WHEELS = 'set_wheels'        # Python -> MCU: (left: int, right: int) en % [-100, 100]
@@ -77,6 +77,8 @@ class Controller():
                 self.transition_poked_sent = False
                 self.previous_error = None # evita el pico de la derivada en la primera muestra
                 self.error = None
+            if changed and self.fsm.get_current_state() == State.IDLE:
+                self.there_is_obstacle = False # al volver a reposo no se arrastra el obstaculo de la partida
             return changed
 
     def get_state(self):

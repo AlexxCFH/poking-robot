@@ -144,23 +144,6 @@ class BalloonDetector:
         error = width / 2 - cx
         return Detection(True, cx, cy, cv.contourArea(contour), error, contour), small, mask
 
-    @staticmethod
-    def draw(small, det, popped=None):
-        """Dibuja el centroide y la linea central sobre el frame reducido (para depurar)."""
-        out = small.copy()
-        h, w = out.shape[:2]
-        cv.line(out, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
-        if det.found:
-            cv.drawContours(out, [det.contour], -1, (255, 100, 0), 2)
-            cv.circle(out, (det.cx, det.cy), 6, (0, 0, 255), -1)
-            cv.putText(out, f"error: {det.error:.1f}", (5, 20),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        if popped is not None:
-            cv.putText(out, f"pinchados: {popped}", (5, h - 8),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        return out
-
-
 def configure_camera(cam, exposure=None, width=1280, height=720):
     """Desactiva exposicion y balance de blancos automaticos para que los globos no salgan lavados.
 
@@ -231,8 +214,9 @@ class PopCounter:
 
 
 if __name__ == "__main__":
-    # prueba rapida: python vision.py [color] [imagen_o_carpeta]
-    # sin ruta usa la webcam; con ruta recorre las imagenes (cualquier tecla = siguiente, q = salir)
+    # prueba rapida sin ventanas: python vision.py [color] [imagen_o_carpeta]
+    # sin ruta usa la camara y imprime la deteccion por consola (Ctrl+C para salir);
+    # con ruta imprime la deteccion de cada imagen
     import glob
     import os
     import sys
@@ -246,29 +230,24 @@ if __name__ == "__main__":
             if frame is None:
                 print("No se pudo leer", f)
                 continue
-            det, small, mask = detector.detect(frame)
+            det, _, _ = detector.detect(frame)
             print(os.path.basename(f), det)
-            cv.imshow("deteccion", BalloonDetector.draw(small, det))
-            cv.imshow("mascara", mask)
-            if cv.waitKey(0) & 0xFF == ord("q"):
-                break
-        cv.destroyAllWindows()
         sys.exit()
 
     counter = PopCounter()
     cam = cv.VideoCapture(0)
     # python vision.py red "" -6  -> tercer argumento opcional: exposicion manual
     print("camara:", configure_camera(cam, float(sys.argv[3]) if len(sys.argv) > 3 else None))
-    while cam.isOpened():
-        ok, frame = cam.read()
-        if not ok:
-            break
-        det, small, mask = detector.detect(frame)
-        if counter.update(det):
-            print("globo pinchado! total:", counter.count)
-        cv.imshow("deteccion", BalloonDetector.draw(small, det, counter.count))
-        cv.imshow("mascara", mask)
-        if cv.waitKey(1) & 0xFF == ord("q"):
-            break
-    cam.release()
-    cv.destroyAllWindows()
+    try:
+        while cam.isOpened():
+            ok, frame = cam.read()
+            if not ok:
+                break
+            det, _, _ = detector.detect(frame)
+            if counter.update(det):
+                print("globo pinchado! total:", counter.count)
+            print(det)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cam.release()

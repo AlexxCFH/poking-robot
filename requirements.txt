@@ -1,7 +1,7 @@
 # Dependencias de Python del proyecto (placa UNO Q y desarrollo local)
 
 # OpenCV: en la placa (Linux, sin pantalla) la version headless que fija el contenedor de App Lab;
-# en los PCs de desarrollo la version completa, necesaria para cv.imshow en vision.py
+# en los PCs de desarrollo la version completa (el codigo ya no abre ventanas)
 opencv-python-headless>=4.13,<4.14; sys_platform == "linux"
 opencv-python>=4.8; sys_platform != "linux"
 numpy>=1.24

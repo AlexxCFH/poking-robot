@@ -10,7 +10,7 @@
 #include "config.h"
 #include "vision_link.h"
 
-const int INV_FREQ = 100; // inversa de la frecuencia -> 10 Hz son 0,1 s = 100 ms
+const unsigned long INV_FREQ = 100.0; // inversa de la frecuencia -> 10 Hz son 0,1 s = 100 ms
 // ============================================================
 //                       PULSADORES
 // ============================================================
@@ -826,5 +826,5 @@ void loop() {
       break;  // los motores se mueven con los comandos del Monitor
   }
 
-  delay(INV_FREQ);// ms 
+delay(INV_FREQ);// ms 
 }
