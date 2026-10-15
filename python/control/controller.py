@@ -18,8 +18,13 @@ MIN_LOCKED_FRAMES = 3 # frames seguidos con el contorno grande y |error| <= EPSI
 POKED_LOST_FRAMES = 2 # frames seguidos sin contorno tras estar fijado para lanzar POKED (filtra parpadeos de 1 frame)
 ERROR_FILTER_ALPHA = 0.5 # filtro paso bajo del error visual (1 = sin filtro); quita el ruido del centroide
 MAX_STEERING = 0.6 * VCONS # saturacion de la ley de control para no bloquear una rueda
-LOST_FRAMES_TO_WANDER = 10 # frames seguidos sin ver el globo en APPROACH para volver a buscar (0.5 s a 20 Hz)
+LOST_FRAMES_TO_WANDER = 10 # frames seguidos sin ver el globo en APPROACH para volver a buscar (1 s a 10 Hz)
 WANDER_THETA = 7.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
+# frenada al salir de APPROACH (POKED, TARGET_LOST, ROBOT_PRESENCE): primero un pulso de contramarcha
+# proporcional a la velocidad que llevaba cada rueda y despues ruedas a 0 (el MCU activa el freno del shield)
+BRAKE_REVERSE_GAIN = 0.6 # fraccion de la velocidad previa que se aplica en sentido contrario
+BRAKE_REVERSE_CYCLES = 1 # ciclos de contramarcha (0.1 s a 10 Hz); mas ciclos haria retroceder al robot
+BRAKE_HOLD_CYCLES = 2 # ciclos con las ruedas a 0 antes de empezar a girar en WANDER
 
 PRINT_PERIOD_S = 0.5 # segundos entre prints de la deteccion de la camara
 
@@ -67,6 +72,8 @@ class Controller():
         self.locked_frames = 0 # frames seguidos con el contorno objetivo grande y centrado (fijado)
         self.lost_frames = 0 # frames seguidos sin ver el globo en APPROACH
         self._last_tau = {"left": 0.0, "right": 0.0}
+        self._brake_cycles = 0 # ciclos de frenada que quedan (contramarcha + parada)
+        self._brake_from = None # velocidad de las ruedas al empezar la frenada
         self.there_is_obstacle = False # la presencia de un robot se considera obstaculo
         self.goals_ack_pending = False # hay que confirmar al MCU los colores recibidos
         self._last_print = 0.0 # instante del ultimo print de la camara
@@ -83,7 +90,12 @@ class Controller():
     def _apply_transition(self, transition):
         """Aplica una transicion a la FSM y resetea el estado del controlador visual al entrar en APPROACH o IDLE."""
         with self._lock:
+            previous_state = self.fsm.get_current_state()
             changed = self.fsm.update_state(transition)
+            if changed and previous_state == State.APPROACH:
+                # sale de APPROACH a velocidad de crucero: se frena antes de girar en WANDER
+                self._brake_cycles = BRAKE_REVERSE_CYCLES + BRAKE_HOLD_CYCLES
+                self._brake_from = dict(self._last_tau)
             if changed and self.fsm.get_current_state() in (State.APPROACH, State.IDLE):
                 self.locked_frames = 0
                 self.lost_frames = 0
@@ -91,6 +103,7 @@ class Controller():
                 self.error = None
             if changed and self.fsm.get_current_state() == State.IDLE:
                 self.there_is_obstacle = False # al volver a reposo no se arrastra el obstaculo de la partida
+                self._brake_cycles = 0 # en IDLE las ruedas ya van a 0
             return changed
 
     def get_state(self):
@@ -242,9 +255,12 @@ class Controller():
         if self.there_is_obstacle:
             return {"left": 0.0, "right": 0.0}
         if self.error is None:
-            # globo perdido unos frames (reflejo, o ya encima para pincharlo): se mantiene la ultima
-            # orden hasta que vision_callback decida POKED o TARGET_LOST
-            return self._last_tau
+            # globo fijado que desaparece: se esta pinchando, se mantiene la ultima orden para empujar
+            # hasta que vision_callback lance POKED. Si no estaba fijado se frena mientras se decide
+            # si es un parpadeo de la vision o TARGET_LOST, en vez de seguir a ciegas a toda velocidad
+            if self.locked_frames >= MIN_LOCKED_FRAMES:
+                return self._last_tau
+            return {"left": 0.0, "right": 0.0}
 
         previous = self.error if self.previous_error is None else self.previous_error
         derivative = (self.error - previous) * self.fsm.get_frequency()
@@ -260,12 +276,23 @@ class Controller():
             "right": self._clamp(VCONS + control_law),
         }
 
+    def _brake_tau(self):
+        """Frenada al salir de APPROACH: BRAKE_REVERSE_CYCLES de contramarcha y despues ruedas a 0."""
+        with self._lock:
+            cycles, start = self._brake_cycles, self._brake_from
+            self._brake_cycles -= 1
+        if cycles > BRAKE_HOLD_CYCLES:
+            return {wheel: -BRAKE_REVERSE_GAIN * speed for wheel, speed in start.items()}
+        return {"left": 0.0, "right": 0.0}
+
     def control_loop(self):
         """Bucle de control principal que se ejecuta periódicamente a la frecuencia de la FSM."""
         self.send_goals_ack()
         state = self.get_state()
 
-        if state == State.WANDER:
+        if self._brake_cycles > 0 and state != State.IDLE:
+            tau = self._brake_tau()
+        elif state == State.WANDER:
             tau = self._wander_tau()
         elif state == State.APPROACH:
             tau = self._approach_tau()
