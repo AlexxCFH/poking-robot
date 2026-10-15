@@ -7,7 +7,7 @@ from control.controller import Controller
 from control.fsm import Goal
 from vision.vision import BalloonDetector, Detection, configure_camera
 
-FREQUENCY = 20.0 # Hz - frecuencia del sistema, debe coincidir con la del MCU
+FREQUENCY = 10.0 # Hz - frecuencia del sistema, debe coincidir con la del MCU
 CAMERA_INDEX = 0
 CAMERA_EXPOSURE = None # None = no se toca la exposicion, solo se pasa a manual
 
