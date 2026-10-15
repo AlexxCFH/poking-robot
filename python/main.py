@@ -11,7 +11,7 @@ FREQUENCY = 20.0 # Hz - frecuencia del sistema, debe coincidir con la del MCU
 CAMERA_INDEX = 0
 CAMERA_EXPOSURE = None # None = no se toca la exposicion, solo se pasa a manual
 
-controller = Controller(Goal.RED, Goal.BLUE, FREQUENCY)
+controller = Controller(Goal.BLUE, Goal.BLUE, FREQUENCY) # colores por defecto; se cambian con P2/P3 en el MCU
 detector = BalloonDetector(controller.get_goal().value)
 
 camera = cv.VideoCapture(CAMERA_INDEX)

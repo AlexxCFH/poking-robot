@@ -25,6 +25,7 @@ class Transition(str, Enum):
     POKED = 'POKED'
     ROBOT_PRESENCE = 'ROBOT_PRESENCE'
     CLEAR_PATH = 'CLEAR_PATH'
+    RESET = 'RESET' # el MCU vuelve a reposo (fin de partida o menu de tests)
 
 
 # Tabla de transiciones: (estado actual, transicion) -> estado siguiente
@@ -36,6 +37,9 @@ TRANSITION_TABLE = {
     (State.APPROACH, Transition.POKED): State.WANDER,
     (State.APPROACH, Transition.ROBOT_PRESENCE): State.AVOID,
     (State.AVOID, Transition.CLEAR_PATH): State.WANDER,
+    (State.WANDER, Transition.RESET): State.IDLE,
+    (State.APPROACH, Transition.RESET): State.IDLE,
+    (State.AVOID, Transition.RESET): State.IDLE,
 }
 
 
@@ -49,11 +53,24 @@ class FiniteStateMachine():
         self.transition = None
         self.num_baloons_poked = 0 # globos pinchados counter
 
+        self.current_goal, self.next_goal = self._parse_goals(goal1, goal2)
+
+    @staticmethod
+    def _parse_goals(goal1, goal2):
         try:
-            self.current_goal = Goal(goal1)
-            self.next_goal = Goal(goal2)
+            return Goal(goal1), Goal(goal2)
         except ValueError:
             raise ValueError('Wrong string passed as goal value')
+
+    def set_goals(self, goal1, goal2):
+        """Cambia el color objetivo inicial y el final. Solo se permite en IDLE; devuelve True si se aplica."""
+        if self.current_state != State.IDLE:
+            return False
+        try:
+            self.current_goal, self.next_goal = self._parse_goals(goal1, goal2)
+        except ValueError:
+            return False
+        return True
 
     def update_state(self, transition):
         """
@@ -74,6 +91,8 @@ class FiniteStateMachine():
 
         if transition == Transition.POKED:
             self.baloon_poked()
+        elif transition == Transition.RESET:
+            self.baloon_poked(reset=True)
         return True
 
     def _update_goal(self):
@@ -91,6 +110,9 @@ class FiniteStateMachine():
 
     def get_goal(self):
         return self.current_goal
+
+    def get_next_goal(self):
+        return self.next_goal
 
     def baloon_poked(self, reset=False):
         if reset:

@@ -10,10 +10,15 @@ EPSILON = 1 # visual error in pixels admited
 MIN_VISUAL_TRACK_ITER = 15 # iterations of the visual controller to consider it successful and launch transition POKED
 WANDER_THETA = -0.1 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
 
-# Nombres de las funciones RPC del Bridge (deben coincidir con el sketch del MCU)
-BRIDGE_SET_WHEELS = 'set_wheels'        # Python -> MCU: (left: float, right: float)
+MAX_WHEEL_REF = 2 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
+
+# Nombres de las funciones RPC del Bridge (deben coincidir con sketch/config.h)
+BRIDGE_SET_WHEELS = 'set_wheels'        # Python -> MCU: (left: int, right: int) en % [-100, 100]
+BRIDGE_CONFIRM_GOALS = 'confirmar_goals' # Python -> MCU: (goal: str, next_goal: str) -> bool, colores aplicados
+BRIDGE_DETECTION = 'set_detection'      # Python -> MCU: (error: int, found: bool), solo para depurar
+BRIDGE_SET_GOALS = 'set_goals'          # MCU -> Python: (goal: str, next_goal: str), elegidos con P2/P3
 BRIDGE_OBSTACLE = 'obstacle'            # -> Python: (present: bool)
-BRIDGE_TRANSITION = 'transition'        # -> Python: (transition: str), p.ej. 'START', 'DETECTED_TARGET'
+BRIDGE_TRANSITION = 'transition'        # MCU -> Python: (transition: str), 'START' tras la cuenta atras o 'RESET'
 
 
 class PDControllerParams():
@@ -48,6 +53,7 @@ class Controller():
         self.fsm = FiniteStateMachine(goal1, goal2, frequency)
         self.transition_poked_sent = False  # Flag para evitar publicar múltiples transiciones
         self.there_is_obstacle = False # la presencia de un robot se considera obstaculo
+        self.goals_ack_pending = False # hay que confirmar al MCU los colores recibidos
 
         # los callbacks del Bridge se ejecutan en otro hilo distinto al del control_loop
         self._lock = threading.Lock()
@@ -56,12 +62,13 @@ class Controller():
     def _register_bridge_callbacks(self):
         Bridge.provide(BRIDGE_OBSTACLE, self.obstacle_callback)
         Bridge.provide(BRIDGE_TRANSITION, self.fsm_callback)
+        Bridge.provide(BRIDGE_SET_GOALS, self.set_goals_callback)
 
     def _apply_transition(self, transition):
-        """Aplica una transicion a la FSM y resetea el estado del controlador visual al entrar en APPROACH."""
+        """Aplica una transicion a la FSM y resetea el estado del controlador visual al entrar en APPROACH o IDLE."""
         with self._lock:
             changed = self.fsm.update_state(transition)
-            if changed and self.fsm.get_current_state() == State.APPROACH:
+            if changed and self.fsm.get_current_state() in (State.APPROACH, State.IDLE):
                 self.controller_consecutive_actions_sent = 0
                 self.transition_poked_sent = False
                 self.previous_error = None # evita el pico de la derivada en la primera muestra
@@ -89,6 +96,31 @@ class Controller():
         if detection.found and self.get_state() == State.WANDER:
             self._apply_transition(Transition.DETECTED_TARGET)
         self.error_callback(detection.error if detection.found else None)
+        Bridge.notify(BRIDGE_DETECTION, int(detection.error) if detection.found else 0, bool(detection.found))
+
+    def set_goals_callback(self, goal, next_goal):
+        """El MCU envia los colores elegidos con P2/P3 (Bridge). Solo se aplican en IDLE.
+
+        La confirmacion se envia desde control_loop, fuera del callback del Bridge.
+        """
+        with self._lock:
+            applied = self.fsm.set_goals(goal, next_goal)
+        if applied:
+            self.goals_ack_pending = True
+        else:
+            print('Colores rechazados (FSM fuera de IDLE o color no valido):', goal, next_goal)
+
+    def send_goals_ack(self):
+        """Confirma al MCU los colores aplicados; si falla, el MCU los vuelve a enviar."""
+        if not self.goals_ack_pending:
+            return
+        self.goals_ack_pending = False
+        with self._lock:
+            goal, next_goal = self.fsm.get_goal(), self.fsm.get_next_goal()
+        try:
+            Bridge.call(BRIDGE_CONFIRM_GOALS, goal.value, next_goal.value)
+        except Exception as e:
+            print('Error confirmando los colores al MCU:', e)
 
     def obstacle_callback(self, present):
         """Callback para la detección de obstáculos (Bridge)."""
@@ -119,10 +151,14 @@ class Controller():
         self._apply_transition(msg)
 
     def send_bridge(self, tau):
-        """Envia a Arduino Q UNO la referencia de control de cada rueda."""
-        left_wheel = float(tau["left"])
-        right_wheel = float(tau["right"])
+        """Envia a Arduino Q UNO la referencia de control de cada rueda en % de PWM."""
+        left_wheel = self._to_percent(tau["left"])
+        right_wheel = self._to_percent(tau["right"])
         Bridge.notify(BRIDGE_SET_WHEELS, left_wheel, right_wheel)
+
+    @staticmethod
+    def _to_percent(reference):
+        return int(round(max(-1.0, min(1.0, reference / MAX_WHEEL_REF)) * 100))
 
     @staticmethod
     def _clamp(value, low=0.0, high=2 * VCONS):
@@ -159,6 +195,7 @@ class Controller():
 
     def control_loop(self):
         """Bucle de control principal que se ejecuta periódicamente a la frecuencia de la FSM."""
+        self.send_goals_ack()
         state = self.get_state()
 
         if state == State.WANDER:
