@@ -32,10 +32,19 @@ def detect_goal():
     return det
 
 
+last_state = None
+
+
 def loop():
-    global next_tick
+    global next_tick, last_state
     controller.vision_callback(detect_goal())
     controller.control_loop()
+
+    # solo se imprime al cambiar de estado para no saturar la consola a 20 Hz
+    state = controller.get_state()
+    if state != last_state:
+        print("estado:", state.value, "| objetivo:", controller.get_goal().value)
+        last_state = state
 
     # espera hasta el siguiente instante fijo descontando el tiempo de computo del ciclo
     next_tick += period

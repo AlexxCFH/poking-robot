@@ -1,14 +1,17 @@
 import threading
+import time
 
 from arduino.app_utils import Bridge
 
 from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
-VCONS = 1.00 # velocidad lineal de los motores (unit? probably rev/s)
-EPSILON = 1 # visual error in pixels admited
+VCONS = 4.00 # velocidad lineal de los motores (unit? probably rev/s)
+EPSILON = 4 # visual error in pixels admited
 MIN_VISUAL_TRACK_ITER = 15 # iterations of the visual controller to consider it successful and launch transition POKED
-WANDER_THETA = -1.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
+WANDER_THETA = 5.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
+
+PRINT_PERIOD_S = 0.5 # segundos entre prints de la deteccion de la camara
 
 MAX_WHEEL_REF = 2 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
 
@@ -54,6 +57,7 @@ class Controller():
         self.transition_poked_sent = False  # Flag para evitar publicar múltiples transiciones
         self.there_is_obstacle = False # la presencia de un robot se considera obstaculo
         self.goals_ack_pending = False # hay que confirmar al MCU los colores recibidos
+        self._last_print = 0.0 # instante del ultimo print de la camara
 
         # los callbacks del Bridge se ejecutan en otro hilo distinto al del control_loop
         self._lock = threading.Lock()
@@ -96,7 +100,27 @@ class Controller():
         if detection.found and self.get_state() == State.WANDER:
             self._apply_transition(Transition.DETECTED_TARGET)
         self.error_callback(detection.error if detection.found else None)
+        self._print_detection(detection)
         Bridge.notify(BRIDGE_DETECTION, int(detection.error) if detection.found else 0, bool(detection.found))
+
+    def _print_detection(self, detection):
+        """Imprime el error visual (px) y en que mitad de la imagen esta el centroide, como mucho cada PRINT_PERIOD_S."""
+        now = time.monotonic()
+        if now - self._last_print < PRINT_PERIOD_S:
+            return
+        self._last_print = now
+
+        if not detection.found:
+            print('camara: sin globo')
+            return
+        # error = width/2 - cx: positivo = centroide en la mitad izquierda
+        if detection.error > 0:
+            half = 'izquierda'
+        elif detection.error < 0:
+            half = 'derecha'
+        else:
+            half = 'centro'
+        print(f'camara: error = {detection.error:.1f} px | centroide en la mitad {half} (cx = {detection.cx} px)')
 
     def set_goals_callback(self, goal, next_goal):
         """El MCU envia los colores elegidos con P2/P3 (Bridge). Solo se aplican en IDLE.
@@ -171,10 +195,11 @@ class Controller():
         theta = WANDER_THETA # girar sobre sí mismo
         if theta == 0: # avanza recto
             return {"left": VCONS, "right": VCONS}
-        # a implementar a futuro: girar sin frenar a 0 cada rueda
+        # giro sobre si mismo: ruedas con velocidades opuestas (pueden ser negativas, el MCU las admite)
+        speed = self._clamp(abs(theta))
         if theta > 0: # regla de la mano izq. (giro antihorario)
-            return {"left": 0.0, "right": theta}
-        return {"left": -theta, "right": 0.0}
+            return {"left": -speed, "right": speed}
+        return {"left": speed, "right": -speed}
 
     def _approach_tau(self):
         # si hay obstaculo de momento se fija a 0, esa logica se implementa a futuro
