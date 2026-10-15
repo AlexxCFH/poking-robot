@@ -23,6 +23,7 @@ class Transition(str, Enum):
     START = 'START'
     DETECTED_TARGET = 'DETECTED_TARGET'
     POKED = 'POKED'
+    TARGET_LOST = 'TARGET_LOST' # se pierde el globo en APPROACH sin haberlo pinchado
     ROBOT_PRESENCE = 'ROBOT_PRESENCE'
     CLEAR_PATH = 'CLEAR_PATH'
     RESET = 'RESET' # el MCU vuelve a reposo (fin de partida o menu de tests)
@@ -36,6 +37,7 @@ TRANSITION_TABLE = {
     (State.WANDER, Transition.DETECTED_TARGET): State.APPROACH,
     (State.WANDER, Transition.ROBOT_PRESENCE): State.AVOID,
     (State.APPROACH, Transition.POKED): State.WANDER,
+    (State.APPROACH, Transition.TARGET_LOST): State.WANDER,
     (State.APPROACH, Transition.ROBOT_PRESENCE): State.AVOID,
     (State.AVOID, Transition.CLEAR_PATH): State.WANDER,
     (State.WANDER, Transition.RESET): State.IDLE,
