@@ -12,7 +12,6 @@ WANDER_THETA = -0.1 # velocidad de giro sobre si mismo en WANDER (negativo = hor
 
 # Nombres de las funciones RPC del Bridge (deben coincidir con el sketch del MCU)
 BRIDGE_SET_WHEELS = 'set_wheels'        # Python -> MCU: (left: float, right: float)
-BRIDGE_VISUAL_ERROR = 'visual_error'    # -> Python: (error: int) en pixeles
 BRIDGE_OBSTACLE = 'obstacle'            # -> Python: (present: bool)
 BRIDGE_TRANSITION = 'transition'        # -> Python: (transition: str), p.ej. 'START', 'DETECTED_TARGET'
 
@@ -55,7 +54,6 @@ class Controller():
         self._register_bridge_callbacks()
 
     def _register_bridge_callbacks(self):
-        Bridge.provide(BRIDGE_VISUAL_ERROR, self.error_callback)
         Bridge.provide(BRIDGE_OBSTACLE, self.obstacle_callback)
         Bridge.provide(BRIDGE_TRANSITION, self.fsm_callback)
 
@@ -74,9 +72,23 @@ class Controller():
         with self._lock:
             return self.fsm.get_current_state()
 
+    def get_goal(self):
+        with self._lock:
+            return self.fsm.get_goal()
+
     def error_callback(self, msg):
-        """Callback para el error visual de la cámara (Bridge)."""
-        self.error = float(msg) # recibe un int, se parsea como float
+        """Actualiza el error visual (px). None si no se ve el globo objetivo."""
+        self.error = None if msg is None else float(msg)
+
+    def vision_callback(self, detection):
+        """Recibe la Detection de vision (vision.BalloonDetector) del globo del color objetivo.
+
+        En WANDER, ver el globo lanza DETECTED_TARGET. La transicion se aplica antes de actualizar
+        el error porque al entrar en APPROACH se resetea el estado del controlador visual.
+        """
+        if detection.found and self.get_state() == State.WANDER:
+            self._apply_transition(Transition.DETECTED_TARGET)
+        self.error_callback(detection.error if detection.found else None)
 
     def obstacle_callback(self, present):
         """Callback para la detección de obstáculos (Bridge)."""
@@ -135,10 +147,11 @@ class Controller():
 
         previous = self.error if self.previous_error is None else self.previous_error
         derivative = (self.error - previous) * self.fsm.get_frequency()
+        # el error de vision ya es referencia - medida (width/2 - cx, positivo = globo a la izquierda),
+        # por lo que no hace falta invertir el signo de la ley de control
         control_law = (self.steering_gains.getKp() * self.error) + (self.steering_gains.getKd() * derivative)
-        control_law = -control_law # invertir signo de la ley de control dado el esquema de feedback
 
-        # velocidad diferencial: una rueda acelera y la otra frena segun el signo de la ley de control
+        # velocidad diferencial: control_law > 0 acelera la rueda derecha y gira a la izquierda (antihorario)
         return {
             "left": self._clamp(VCONS - control_law),
             "right": self._clamp(VCONS + control_law),

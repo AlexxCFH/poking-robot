@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Pipeline de vision para localizar globos por color.
 # resize -> gaussian blur -> HSV -> inRange -> mascara binaria -> contornos -> momentos -> cx -> error
 from dataclasses import dataclass, field
