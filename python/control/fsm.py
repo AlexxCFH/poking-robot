@@ -26,6 +26,7 @@ class Transition(str, Enum):
     ROBOT_PRESENCE = 'ROBOT_PRESENCE'
     CLEAR_PATH = 'CLEAR_PATH'
     RESET = 'RESET' # el MCU vuelve a reposo (fin de partida o menu de tests)
+    STOP = 'STOP' # parada manual: P1 pulsado de nuevo con el robot en marcha
 
 
 # Tabla de transiciones: (estado actual, transicion) -> estado siguiente
@@ -40,6 +41,9 @@ TRANSITION_TABLE = {
     (State.WANDER, Transition.RESET): State.IDLE,
     (State.APPROACH, Transition.RESET): State.IDLE,
     (State.AVOID, Transition.RESET): State.IDLE,
+    (State.WANDER, Transition.STOP): State.IDLE,
+    (State.APPROACH, Transition.STOP): State.IDLE,
+    (State.AVOID, Transition.STOP): State.IDLE,
 }
 
 
@@ -91,7 +95,7 @@ class FiniteStateMachine():
 
         if transition == Transition.POKED:
             self.baloon_poked()
-        elif transition == Transition.RESET:
+        elif transition in (Transition.RESET, Transition.STOP):
             self.baloon_poked(reset=True)
         return True
 

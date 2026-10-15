@@ -5,10 +5,10 @@ from arduino.app_utils import Bridge
 from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
-VCONS = 0.25 # velocidad lineal de los motores (unit? probably rev/s)
+VCONS = 1.00 # velocidad lineal de los motores (unit? probably rev/s)
 EPSILON = 1 # visual error in pixels admited
 MIN_VISUAL_TRACK_ITER = 15 # iterations of the visual controller to consider it successful and launch transition POKED
-WANDER_THETA = -0.1 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
+WANDER_THETA = -1.00 # velocidad de giro sobre si mismo en WANDER (negativo = horario)
 
 MAX_WHEEL_REF = 2 * VCONS # referencia de rueda que corresponde al 100% de PWM en el MCU
 
@@ -44,8 +44,8 @@ class PDControllerParams():
 class Controller():
     def __init__(self, goal1, goal2, frequency):
         # PD controller gains
-        self.steering_gains = PDControllerParams(kp=0.001, kd=0.0005, is_steering=True)
-        self.lineal_gains = PDControllerParams(kp=1.0, kd=0.1, is_steering=False)
+        self.steering_gains = PDControllerParams(kp=0.1, kd=0.05, is_steering=True)
+        self.lineal_gains = PDControllerParams(kp=1.0, kd=0.0, is_steering=False)
 
         self.error = None
         self.previous_error = 0.0

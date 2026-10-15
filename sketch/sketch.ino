@@ -519,6 +519,14 @@ void ActualizarEstrategia() {
 
       ParpadearLed(PIN_LED_VERDE, 500);
 
+      // P1 de nuevo: la FSM de Python pasa a IDLE (STOP) y el MCU vuelve a reposo con motores a 0
+      if (pulsador1.evento == PRESIONADO) {
+        Bridge.notify(RPC_TRANSITION, String(TRANSICION_STOP));
+        Monitor.println("PARADA MANUAL (P1)");
+        ReiniciarEstrategia();
+        break;
+      }
+
       if (millis() - tiempoEstado >= DURACION_PARTIDA_MS) {
         CambiarEstado(FIN);
         break;

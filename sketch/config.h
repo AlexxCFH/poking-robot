@@ -42,6 +42,7 @@ const unsigned long PERIODO_SINCRONIZACION_MS = 1000;  // reenvio de colores has
 
 #define TRANSICION_START "START"  // IDLE -> WANDER al terminar la cuenta atras
 #define TRANSICION_RESET "RESET"  // cualquier estado -> IDLE al volver a reposo
+#define TRANSICION_STOP  "STOP"   // WANDER/APPROACH/AVOID -> IDLE al pulsar P1 con el robot en marcha
 
 
 // ============================================================
