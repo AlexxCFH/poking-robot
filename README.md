@@ -48,7 +48,8 @@ python/
 
    Ejemplo: una pulsación de P2 = buscar **rojo**; una pulsación de P3 = color final **verde**. Los colores elegidos se muestran en el Monitor.
 3. **Arrancar con P1**: el LED rojo parpadea (cada 500 ms) durante **5 s** y después el robot empieza solo (transición `START`, IDLE → WANDER). LED verde parpadeando = en marcha.
-4. A los **3 min** el MCU para los motores (LED verde fijo). **P1** vuelve a reposo para otro intento.
+4. **Parar**: P1 con el robot en marcha lo para (transición `STOP`) y vuelve a reposo. A los **3 min** el MCU para los motores él solo (LED verde fijo); **P1** vuelve a reposo para otro intento.
+5. **Cambiar de color tras parar**: P2/P3 funcionan en cualquier estado con los motores parados (reposo, cuenta atrás o fin de partida). El cambio cancela la cuenta atrás si estaba en curso, vuelve a sincronizar los colores con Python y hay que pulsar **P1** de nuevo para arrancar.
 
 | LED | Estado del MCU |
 |---|---|
@@ -77,14 +78,17 @@ A0/A1 son también la medida de corriente del Motor Shield; en este robot se usa
 
 ```
 SINCRONIZANDO ──(Python confirma colores)──► ESPERANDO_INICIO ──(P1)──► CUENTA_ATRAS
-   ▲   ▲                                          │                          │ 5 s
-   │   └──────────(P2/P3: cambia color)───────────┘                          ▼
+   ▲   ▲                                                                     │ 5 s
+   │   └───────────────(P1: parada manual, envía STOP)────────────────┐      ▼
    └──────────────────────(P1)──────────── FIN ◄────(3 min)──────────── EN_MARCHA
+
+P2/P3 en cualquier estado salvo EN_MARCHA ──► cambia color ──► SINCRONIZANDO
 ```
 
 - `SINCRONIZANDO` y `ESPERANDO_INICIO` equivalen al estado **IDLE** de la FSM de Python.
+- **P2/P3** se leen en todos los estados con los motores parados (todos menos `EN_MARCHA`): cambian el color y llevan a `SINCRONIZANDO`, que pone a Python en IDLE con los colores nuevos. En `CUENTA_ATRAS` el cambio cancela el arranque.
 - En `SINCRONIZANDO` el MCU envía `transition("RESET")` + `set_goals(inicial, final)` al entrar y cada segundo, hasta que Python responde con `confirmar_goals` y los colores coinciden. Así el MCU nunca arranca con colores distintos a los de Python.
-- Al entrar en `EN_MARCHA` envía `transition("START")` y desde ese momento aplica las velocidades `set_wheels` de Python. Si dejan de llegar durante `TIMEOUT_COMANDO_MS` (5 periodos = 250 ms) para los motores.
+- Al entrar en `EN_MARCHA` envía `transition("START")` (y lo reenvía cada segundo por si se perdió; desde WANDER/APPROACH/AVOID Python lo ignora) y desde ese momento aplica las velocidades `set_wheels` de Python. Si dejan de llegar durante `TIMEOUT_COMANDO_MS` (5 periodos = 250 ms) para los motores.
 - Al entrar en `FIN` envía `transition("RESET")`; Python vuelve a IDLE.
 - Fuera de `EN_MARCHA` el MCU ignora `set_wheels`: es la última autoridad sobre los motores.
 

@@ -457,12 +457,13 @@ void CambiarEstado(EstadoRobot nuevo) {
       tiempoComando = 0;
 
       // la FSM de Python pasa de IDLE a WANDER
+      tiempoSincronizacion = millis();
       Bridge.notify(RPC_TRANSITION, String(TRANSICION_START));
       break;
 
     case FIN:
       EscribirLed(PIN_LED_VERDE, true);
-      Monitor.println("FIN DE PARTIDA: motores parados (P1 = volver a reposo)");
+      Monitor.println("FIN DE PARTIDA: motores parados (P1 = volver a reposo, P2/P3 = cambiar colores)");
 
       // la FSM de Python vuelve a IDLE y deja de enviar referencias
       Bridge.notify(RPC_TRANSITION, String(TRANSICION_RESET));
@@ -483,13 +484,27 @@ void ReiniciarEstrategia() {
 
 void ActualizarEstrategia() {
 
+  // P2/P3 cambian los colores siempre que los motores esten parados (cualquier estado salvo
+  // EN_MARCHA, p. ej. tras la parada manual con P1 o al acabar la partida). Python vuelve a
+  // IDLE con los colores nuevos y hay que pulsar P1 otra vez para arrancar.
+  if (estado != EN_MARCHA && ActualizarColores()) {
+
+    if (estado == CUENTA_ATRAS) {
+      Monitor.println("CUENTA ATRAS CANCELADA: colores cambiados");
+    }
+
+    CambiarEstado(SINCRONIZANDO);
+    return;
+  }
+
+
   switch (estado) {
 
     case SINCRONIZANDO:
 
       ParpadearLed(PIN_LED_ROJO, 1000);
 
-      if (ActualizarColores() || millis() - tiempoSincronizacion >= PERIODO_SINCRONIZACION_MS) {
+      if (millis() - tiempoSincronizacion >= PERIODO_SINCRONIZACION_MS) {
         EnviarColores();
       }
       break;
@@ -499,8 +514,6 @@ void ActualizarEstrategia() {
 
       if (pulsador1.evento == PRESIONADO) {
         CambiarEstado(CUENTA_ATRAS);
-      } else if (ActualizarColores()) {
-        CambiarEstado(SINCRONIZANDO);
       }
       break;
 
@@ -525,6 +538,12 @@ void ActualizarEstrategia() {
         Monitor.println("PARADA MANUAL (P1)");
         ReiniciarEstrategia();
         break;
+      }
+
+      // START se reenvia por si se perdio la notificacion; en WANDER/APPROACH/AVOID Python lo ignora
+      if (millis() - tiempoSincronizacion >= PERIODO_SINCRONIZACION_MS) {
+        tiempoSincronizacion = millis();
+        Bridge.notify(RPC_TRANSITION, String(TRANSICION_START));
       }
 
       if (millis() - tiempoEstado >= DURACION_PARTIDA_MS) {
