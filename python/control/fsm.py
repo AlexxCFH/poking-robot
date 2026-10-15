@@ -1,6 +1,6 @@
 from enum import Enum
 
-FREQUENCY = 20.0
+FREQUENCY = 20.0 # Hz - system freq, must be the same in the arduino MCU
 
 GOAL_TOPIC = '/goal'
 TRANSITION_TOPIC = '/transition'
