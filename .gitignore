@@ -1,1 +1,5 @@
-python/control/__pycache__/
+# entorno virtual de Python
+.venv/
+
+__pycache__/
+*.pyc
