@@ -46,7 +46,11 @@ MAX_BALLOONS = 3  # globos por equipo
 
 COLOR_RANGES = {
     "red": [((0, 45, 100), (13, 255, 255)), ((172, 150, 100), (179, 255, 255))],
-    "green": [((44, 40, 200), (80, 255, 255))],
+    # verde con luz artificial y poca iluminacion: H 40-80 deja fuera suelo/amarillo/oliva (H<=34) y
+    # azul/cian (H>=85); S>=100 descarta blancos y grises verdosos de los fluorescentes (S~30-40);
+    # V<=235 descarta brillos casi blancos; V>=40 admite el globo en sombra.
+    # El rango original ((44, 40, 200), (80, 255, 255)) era para el globo sobreexpuesto de data/
+    "green": [((40, 100, 40), (80, 255, 235))],
     "blue": [((85, 100, 60), (115, 255, 255))],
 }
 
