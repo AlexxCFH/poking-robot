@@ -16,9 +16,17 @@ MIN_AREA = 300
 # suelo (muy anchas y finas) y las manchas irregulares se descartan
 MIN_ASPECT = 0.5  # alto / ancho minimo del bounding box
 MIN_FILL = 0.3  # area del contorno / area del bounding box minima
+MIN_SOLIDITY = 0.5  # area del contorno / area de su casco convexo minima (descarta manchas irregulares)
+# region de interes: solo se busca en esta fraccion superior del frame. Los globos estan sobre
+# la pared del campo y el suelo cercano da falsos positivos (marcas, lineas, puntos naranjas)
+ROI_BOTTOM = 0.65
+# CLAHE sobre el canal V para que cambie menos el resultado con la iluminacion
+CLAHE = cv.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
 
 # kernel de erosion (elipse pequena) para quitar manchas pequenas de la mascara
 ERODE_KERNEL = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
+# kernel de cierre para unir los trozos del globo que parten los reflejos blancos
+CLOSE_KERNEL = cv.getStructuringElement(cv.MORPH_ELLIPSE, (7, 7))
 
 # rangos HSV por color (OpenCV: H 0-179, S 0-255, V 0-255); cada color es una lista de (lower, upper)
 # calibrados con las fotos de data/ tomadas desde el robot. Los globos rojo y verde salen muy
@@ -32,7 +40,7 @@ MAX_BALLOONS = 3  # globos por equipo
 
 COLOR_RANGES = {
     "red": [((0, 45, 100), (13, 255, 255)), ((172, 150, 100), (179, 255, 255))],
-    "green": [((38, 40, 100), (85, 255, 255))],
+    "green": [((44, 40, 200), (80, 255, 255))],
     "blue": [((85, 100, 60), (115, 255, 255))],
 }
 
@@ -66,7 +74,9 @@ class ColorSegmenter:
 
     def to_hsv(self, frame):
         blur = cv.GaussianBlur(frame, BLUR_KERNEL, 0)
-        return cv.cvtColor(blur, cv.COLOR_BGR2HSV)
+        hsv = cv.cvtColor(blur, cv.COLOR_BGR2HSV)
+        hsv[:, :, 2] = CLAHE.apply(hsv[:, :, 2])
+        return hsv
 
     def mask(self, hsv):
         binary = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -74,7 +84,13 @@ class ColorSegmenter:
             binary = cv.bitwise_or(
                 binary, cv.inRange(hsv, np.array(lower, np.uint8), np.array(upper, np.uint8))
             )
-        return cv.erode(binary, ERODE_KERNEL)
+        # cierre: une los trozos de un mismo globo; despues se rellenan los huecos de los contornos
+        binary = cv.morphologyEx(binary, cv.MORPH_CLOSE, CLOSE_KERNEL)
+        contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        cv.drawContours(binary, contours, -1, 255, cv.FILLED)
+        binary = cv.erode(binary, ERODE_KERNEL)
+        binary[int(binary.shape[0] * ROI_BOTTOM):, :] = 0  # fuera de la region de interes
+        return binary
 
     def segment(self, frame):
         """Devuelve (frame_reducido, mascara_binaria)."""
@@ -98,7 +114,9 @@ class BalloonDetector:
         if area < self.min_area:
             return False
         _, _, w, h = cv.boundingRect(contour)
-        return h / w >= MIN_ASPECT and area / (w * h) >= MIN_FILL
+        hull_area = cv.contourArea(cv.convexHull(contour))
+        return (h / w >= MIN_ASPECT and area / (w * h) >= MIN_FILL
+                and area / hull_area >= MIN_SOLIDITY)
 
     def largest_contour(self, mask):
         contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
@@ -142,6 +160,29 @@ class BalloonDetector:
             cv.putText(out, f"pinchados: {popped}", (5, h - 8),
                        cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         return out
+
+
+def configure_camera(cam, exposure=None, width=1280, height=720):
+    """Desactiva exposicion y balance de blancos automaticos para que los globos no salgan lavados.
+
+    Los valores de CAP_PROP_AUTO_EXPOSURE y CAP_PROP_EXPOSURE dependen del backend (V4L2 en
+    Linux/placa, DirectShow/MSMF en Windows): 0.25 = manual en V4L2 y 0.75 = automatico; en
+    DirectShow el valor de exposicion suele ser negativo (log2 de segundos, p. ej. -6).
+    Si exposure es None no se toca el valor, solo se pasa a manual. Devuelve los valores que
+    la camara informa tras aplicarlos, para comprobar que se aceptaron.
+    """
+    cam.set(cv.CAP_PROP_FRAME_WIDTH, width)
+    cam.set(cv.CAP_PROP_FRAME_HEIGHT, height)
+    cam.set(cv.CAP_PROP_AUTO_EXPOSURE, 0.25)
+    cam.set(cv.CAP_PROP_AUTO_WB, 0)
+    if exposure is not None:
+        cam.set(cv.CAP_PROP_EXPOSURE, exposure)
+    return {
+        "auto_exposure": cam.get(cv.CAP_PROP_AUTO_EXPOSURE),
+        "exposure": cam.get(cv.CAP_PROP_EXPOSURE),
+        "auto_wb": cam.get(cv.CAP_PROP_AUTO_WB),
+        "size": (cam.get(cv.CAP_PROP_FRAME_WIDTH), cam.get(cv.CAP_PROP_FRAME_HEIGHT)),
+    }
 
 
 class PopCounter:
@@ -198,7 +239,7 @@ if __name__ == "__main__":
     import sys
 
     detector = BalloonDetector(sys.argv[1] if len(sys.argv) > 1 else "red")
-    if len(sys.argv) > 2:
+    if len(sys.argv) > 2 and sys.argv[2]:
         path = sys.argv[2]
         files = sorted(glob.glob(os.path.join(path, "*.jpg"))) if os.path.isdir(path) else [path]
         for f in files:
@@ -217,6 +258,8 @@ if __name__ == "__main__":
 
     counter = PopCounter()
     cam = cv.VideoCapture(0)
+    # python vision.py red "" -6  -> tercer argumento opcional: exposicion manual
+    print("camara:", configure_camera(cam, float(sys.argv[3]) if len(sys.argv) > 3 else None))
     while cam.isOpened():
         ok, frame = cam.read()
         if not ok:
