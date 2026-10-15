@@ -1,5 +1,10 @@
 # Pipeline de vision para localizar globos por color.
 # resize -> gaussian blur -> HSV -> inRange -> mascara binaria -> contornos -> momentos -> cx -> error
+import glob
+import os
+import re
+import sys
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -17,8 +22,10 @@ MIN_ASPECT = 0.5  # alto / ancho minimo del bounding box
 MIN_FILL = 0.3  # area del contorno / area del bounding box minima
 MIN_SOLIDITY = 0.5  # area del contorno / area de su casco convexo minima (descarta manchas irregulares)
 # region de interes: solo se busca en esta fraccion superior del frame. Los globos estan sobre
-# la pared del campo y el suelo cercano da falsos positivos (marcas, lineas, puntos naranjas)
-ROI_BOTTOM = 0.65
+# la pared del campo y el suelo cercano da falsos positivos (marcas, lineas, puntos naranjas).
+# En las fotos de data/ la base de los globos queda por encima de y = 0.36; con 0.65 entraban
+# sombras y cuadros rojos del suelo con area parecida a la del globo
+ROI_BOTTOM = 0.45
 # CLAHE sobre el canal V para que cambie menos el resultado con la iluminacion
 CLAHE = cv.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
 
@@ -144,22 +151,127 @@ class BalloonDetector:
         error = width / 2 - cx
         return Detection(True, cx, cy, cv.contourArea(contour), error, contour), small, mask
 
-def configure_camera(cam, exposure=None, width=1280, height=720):
+CAMERA_SIZE = (1280, 720)  # resolucion pedida a la camara; si no da frames se prueba la de por defecto
+CAMERA_WARMUP_S = 3.0  # tiempo maximo esperando el primer frame al abrir la camara
+LINUX = sys.platform.startswith("linux")
+
+
+def _video_devices():
+    """Linux: lista de (indice, nombre) de los /dev/videoN. En la placa no todos son camaras:
+    el SoC expone tambien nodos del codec de video, asi que la webcam USB puede no ser la 0."""
+    devices = []
+    for path in glob.glob("/dev/video*"):
+        digits = re.sub(r"\D", "", path)
+        if not digits:
+            continue
+        index = int(digits)
+        try:
+            with open(f"/sys/class/video4linux/video{index}/name") as f:
+                name = f.read().strip()
+        except OSError:
+            name = "?"
+        devices.append((index, name))
+    return sorted(devices)
+
+
+def _device_users(index):
+    """PIDs (visibles desde este contenedor) que tienen abierto /dev/videoN, sin contar este proceso.
+    V4L2 deja abrir una camara ocupada, pero read() devuelve False."""
+    target = f"/dev/video{index}"
+    pids = []
+    for fd_dir in glob.glob("/proc/[0-9]*/fd"):
+        pid = int(fd_dir.split("/")[2])
+        if pid == os.getpid():
+            continue
+        try:
+            if any(os.readlink(os.path.join(fd_dir, fd)) == target for fd in os.listdir(fd_dir)):
+                pids.append(pid)
+        except OSError:
+            continue
+    return pids
+
+
+def _try_camera(index, size):
+    """Abre la camara y espera el primer frame. size None = formato por defecto de la camara.
+    Devuelve (cam, estado); cam es None si no da frames."""
+    cam = cv.VideoCapture(index, cv.CAP_V4L2) if LINUX else cv.VideoCapture(index)
+    if not cam.isOpened():
+        cam.release()
+        return None, "no se puede abrir"
+    if hasattr(cv, "CAP_PROP_READ_TIMEOUT_MSEC"):
+        cam.set(cv.CAP_PROP_READ_TIMEOUT_MSEC, 1000)  # por defecto V4L2 espera hasta 10 s por frame
+    if size is not None:
+        # MJPG: en YUYV muchas webcams USB no dan 1280x720 o lo dan a muy pocos fps
+        cam.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
+        cam.set(cv.CAP_PROP_FRAME_WIDTH, size[0])
+        cam.set(cv.CAP_PROP_FRAME_HEIGHT, size[1])
+    cam.set(cv.CAP_PROP_BUFFERSIZE, 1)  # evita procesar frames antiguos del buffer
+    deadline = time.monotonic() + CAMERA_WARMUP_S
+    while time.monotonic() < deadline:  # los primeros frames tras configurar pueden fallar
+        ok, frame = cam.read()
+        if ok and frame is not None and frame.size:
+            return cam, f"ok, frames de {frame.shape[1]}x{frame.shape[0]}"
+    cam.release()
+    return None, "se abre pero no devuelve frames"
+
+
+def open_camera(index=0, size=CAMERA_SIZE, verbose=True):
+    """Abre la primera camara que devuelva frames de verdad, empezando por index.
+
+    En Linux prueba todos los /dev/videoN; en cada uno primero con size (MJPG) y despues con el
+    formato por defecto. Imprime el resultado de cada intento y, si un dispositivo no da frames,
+    que procesos lo tienen abierto. Devuelve (cam, indice) o (None, None).
+    """
+    if LINUX:
+        devices = _video_devices()
+        names = dict(devices)
+        if verbose:
+            print("dispositivos de video:", devices or "ninguno (¿el contenedor tiene acceso a /dev/video*?)")
+        candidates = [index] + [i for i, _ in devices if i != index]
+    else:
+        names = {}
+        candidates = [index] + [i for i in range(4) if i != index]
+
+    for i in candidates:
+        for s in (size, None):
+            cam, status = _try_camera(i, s)
+            if verbose:
+                print(f"  camara {i} ({names.get(i, '?')}) {s or 'formato por defecto'}: {status}")
+            if cam is not None:
+                return cam, i
+            if status == "no se puede abrir":
+                break  # no tiene sentido probar otro formato
+        users = _device_users(i) if LINUX else []
+        if users and verbose:
+            print(f"  /dev/video{i} lo tiene abierto otro proceso (PIDs {users}): cierralo, solo puede usarla uno")
+    return None, None
+
+
+def configure_camera(cam, exposure=None):
     """Desactiva exposicion y balance de blancos automaticos para que los globos no salgan lavados.
 
-    Los valores de CAP_PROP_AUTO_EXPOSURE y CAP_PROP_EXPOSURE dependen del backend (V4L2 en
-    Linux/placa, DirectShow/MSMF en Windows): 0.25 = manual en V4L2 y 0.75 = automatico; en
-    DirectShow el valor de exposicion suele ser negativo (log2 de segundos, p. ej. -6).
-    Si exposure es None no se toca el valor, solo se pasa a manual. Devuelve los valores que
-    la camara informa tras aplicarlos, para comprobar que se aceptaron.
+    Los valores de CAP_PROP_AUTO_EXPOSURE y CAP_PROP_EXPOSURE dependen del backend:
+    - V4L2 (Linux/placa): OpenCV 4.x pasa el valor tal cual al control V4L2 exposure_auto, cuyo menu es
+      1 = manual y 3 = automatico (0.25 se redondea a 0, que las webcams UVC rechazan y siguen en
+      automatico). La exposicion va en unidades de 100 us (p. ej. 50-300).
+    - DirectShow/MSMF (Windows): 0.25 = manual y 0.75 = automatico; la exposicion es log2 de
+      segundos (negativa, p. ej. -6).
+    Si exposure es None la exposicion queda en automatico (pasar a manual sin valor deja uno
+    arbitrario) y tampoco se bloquea el balance de blancos. Devuelve los valores que la camara
+    informa tras aplicarlos, para comprobar que se aceptaron.
     """
-    cam.set(cv.CAP_PROP_FRAME_WIDTH, width)
-    cam.set(cv.CAP_PROP_FRAME_HEIGHT, height)
-    cam.set(cv.CAP_PROP_AUTO_EXPOSURE, 0.25)
-    cam.set(cv.CAP_PROP_AUTO_WB, 0)
+    try:
+        backend = cam.getBackendName()
+    except cv.error: # camara sin abrir
+        backend = None
+    v4l2 = backend == "V4L2"
+    # la resolucion la fija open_camera: cambiarla aqui reiniciaria el streaming
     if exposure is not None:
+        cam.set(cv.CAP_PROP_AUTO_EXPOSURE, 1 if v4l2 else 0.25)
+        cam.set(cv.CAP_PROP_AUTO_WB, 0)
         cam.set(cv.CAP_PROP_EXPOSURE, exposure)
     return {
+        "backend": backend,
         "auto_exposure": cam.get(cv.CAP_PROP_AUTO_EXPOSURE),
         "exposure": cam.get(cv.CAP_PROP_EXPOSURE),
         "auto_wb": cam.get(cv.CAP_PROP_AUTO_WB),
@@ -217,9 +329,13 @@ if __name__ == "__main__":
     # prueba rapida sin ventanas: python vision.py [color] [imagen_o_carpeta]
     # sin ruta usa la camara y imprime la deteccion por consola (Ctrl+C para salir);
     # con ruta imprime la deteccion de cada imagen
-    import glob
-    import os
-    import sys
+    # python vision.py camaras -> solo diagnostica que camaras dan frames
+    if len(sys.argv) > 1 and sys.argv[1] == "camaras":
+        cam, index = open_camera()
+        print("camara elegida:", index)
+        if cam is not None:
+            cam.release()
+        sys.exit()
 
     detector = BalloonDetector(sys.argv[1] if len(sys.argv) > 1 else "red")
     if len(sys.argv) > 2 and sys.argv[2]:
@@ -235,13 +351,16 @@ if __name__ == "__main__":
         sys.exit()
 
     counter = PopCounter()
-    cam = cv.VideoCapture(0)
+    cam, _ = open_camera()
+    if cam is None:
+        sys.exit("ERROR: ninguna camara devuelve frames")
     # python vision.py red "" -6  -> tercer argumento opcional: exposicion manual
     print("camara:", configure_camera(cam, float(sys.argv[3]) if len(sys.argv) > 3 else None))
     try:
         while cam.isOpened():
             ok, frame = cam.read()
             if not ok:
+                print("ERROR: la camara ha dejado de devolver frames")
                 break
             det, _, _ = detector.detect(frame)
             if counter.update(det):
