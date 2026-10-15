@@ -25,6 +25,8 @@ class Transition(str, Enum):
     POKED = 'POKED'
     ROBOT_PRESENCE = 'ROBOT_PRESENCE'
     CLEAR_PATH = 'CLEAR_PATH'
+    RESET = 'RESET' # el MCU vuelve a reposo (fin de partida o menu de tests)
+    STOP = 'STOP' # parada manual: P1 pulsado de nuevo con el robot en marcha
 
 
 # Tabla de transiciones: (estado actual, transicion) -> estado siguiente
@@ -36,6 +38,12 @@ TRANSITION_TABLE = {
     (State.APPROACH, Transition.POKED): State.WANDER,
     (State.APPROACH, Transition.ROBOT_PRESENCE): State.AVOID,
     (State.AVOID, Transition.CLEAR_PATH): State.WANDER,
+    (State.WANDER, Transition.RESET): State.IDLE,
+    (State.APPROACH, Transition.RESET): State.IDLE,
+    (State.AVOID, Transition.RESET): State.IDLE,
+    (State.WANDER, Transition.STOP): State.IDLE,
+    (State.APPROACH, Transition.STOP): State.IDLE,
+    (State.AVOID, Transition.STOP): State.IDLE,
 }
 
 
@@ -49,11 +57,26 @@ class FiniteStateMachine():
         self.transition = None
         self.num_baloons_poked = 0 # globos pinchados counter
 
+        self.current_goal, self.next_goal = self._parse_goals(goal1, goal2)
+        self.initial_goal, self.final_goal = self.current_goal, self.next_goal # colores elegidos, para restaurarlos al volver a IDLE
+
+    @staticmethod
+    def _parse_goals(goal1, goal2):
         try:
-            self.current_goal = Goal(goal1)
-            self.next_goal = Goal(goal2)
+            return Goal(goal1), Goal(goal2)
         except ValueError:
             raise ValueError('Wrong string passed as goal value')
+
+    def set_goals(self, goal1, goal2):
+        """Cambia el color objetivo inicial y el final. Solo se permite en IDLE; devuelve True si se aplica."""
+        if self.current_state != State.IDLE:
+            return False
+        try:
+            self.current_goal, self.next_goal = self._parse_goals(goal1, goal2)
+        except ValueError:
+            return False
+        self.initial_goal, self.final_goal = self.current_goal, self.next_goal
+        return True
 
     def update_state(self, transition):
         """
@@ -74,7 +97,14 @@ class FiniteStateMachine():
 
         if transition == Transition.POKED:
             self.baloon_poked()
+        elif transition in (Transition.RESET, Transition.STOP):
+            self.reset()
         return True
+
+    def reset(self):
+        """Vuelve a la situacion de partida: contador de globos a 0 y colores objetivo los elegidos (sin el intercambio de lotes)."""
+        self.baloon_poked(reset=True)
+        self.current_goal, self.next_goal = self.initial_goal, self.final_goal
 
     def _update_goal(self):
         # intercambia objetivo actual y siguiente para poder seguir alternando lotes
@@ -91,6 +121,9 @@ class FiniteStateMachine():
 
     def get_goal(self):
         return self.current_goal
+
+    def get_next_goal(self):
+        return self.next_goal
 
     def baloon_poked(self, reset=False):
         if reset:
