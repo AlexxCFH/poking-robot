@@ -1,7 +1,5 @@
 from enum import Enum
 
-FREQUENCY = 20.0 # Hz - system freq, must be the same in the arduino MCU
-
 GOAL_TOPIC = '/goal'
 TRANSITION_TOPIC = '/transition'
 STATE_TOPIC = '/state'
@@ -42,8 +40,11 @@ TRANSITION_TABLE = {
 
 
 class FiniteStateMachine():
-    def __init__(self, goal1, goal2):
+    def __init__(self, goal1, goal2, frequency):
         # atributos de clase
+        if frequency <= 0:
+            raise ValueError('System frequency must be positive')
+        self.frequency = float(frequency) # Hz - frecuencia del sistema, debe coincidir con la del MCU
         self.current_state = State.IDLE
         self.transition = None
         self.num_baloons_poked = 0 # globos pinchados counter
@@ -81,6 +82,12 @@ class FiniteStateMachine():
 
     def get_current_state(self):
         return self.current_state
+
+    def get_frequency(self):
+        return self.frequency
+
+    def get_period(self):
+        return 1.0 / self.frequency
 
     def get_goal(self):
         return self.current_goal

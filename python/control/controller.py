@@ -2,7 +2,7 @@ import threading
 
 from arduino.app_utils import Bridge
 
-from .fsm import FREQUENCY, FiniteStateMachine, State, Transition
+from .fsm import FiniteStateMachine, State, Transition
 
 VELOCITY_TOPIC = '/cmd_vel'  # Topic para publicar comandos de velocidad
 VCONS = 0.25 # velocidad lineal de los motores (unit? probably rev/s)
@@ -38,7 +38,7 @@ class PDControllerParams():
 
 
 class Controller():
-    def __init__(self, goal1, goal2):
+    def __init__(self, goal1, goal2, frequency):
         # PD controller gains
         self.steering_gains = PDControllerParams(kp=0.001, kd=0.0005, is_steering=True)
         self.lineal_gains = PDControllerParams(kp=1.0, kd=0.1, is_steering=False)
@@ -46,7 +46,7 @@ class Controller():
         self.error = None
         self.previous_error = 0.0
         self.controller_consecutive_actions_sent = 0 # detectar si ha conseguido minimizar el error visual
-        self.fsm = FiniteStateMachine(goal1, goal2)
+        self.fsm = FiniteStateMachine(goal1, goal2, frequency)
         self.transition_poked_sent = False  # Flag para evitar publicar múltiples transiciones
         self.there_is_obstacle = False # la presencia de un robot se considera obstaculo
 
@@ -134,7 +134,7 @@ class Controller():
             return {"left": 0.0, "right": 0.0}
 
         previous = self.error if self.previous_error is None else self.previous_error
-        derivative = (self.error - previous) * FREQUENCY
+        derivative = (self.error - previous) * self.fsm.get_frequency()
         control_law = (self.steering_gains.getKp() * self.error) + (self.steering_gains.getKd() * derivative)
         control_law = -control_law # invertir signo de la ley de control dado el esquema de feedback
 
@@ -145,7 +145,7 @@ class Controller():
         }
 
     def control_loop(self):
-        """Bucle de control principal que se ejecuta periódicamente a FREQUENCY Hz."""
+        """Bucle de control principal que se ejecuta periódicamente a la frecuencia de la FSM."""
         state = self.get_state()
 
         if state == State.WANDER:
