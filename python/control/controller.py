@@ -154,6 +154,7 @@ class Controller():
             applied = self.fsm.set_goals(goal, next_goal)
         if applied:
             self.goals_ack_pending = True
+            print('Colores aplicados desde el MCU: inicial =', goal, '| final =', next_goal)
         else:
             print('Colores rechazados (FSM fuera de IDLE o color no valido):', goal, next_goal)
 

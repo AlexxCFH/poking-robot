@@ -146,16 +146,17 @@ const ColorGlobo CICLO_COLOR_P3[NUM_COLORES] = { COLOR_AZUL, COLOR_VERDE, COLOR_
 // velocidades de rueda que envia Python mientras esta EN_MARCHA.
 //
 //  SINCRONIZANDO --(Python confirma colores)--> ESPERANDO_INICIO --(P1)--> CUENTA_ATRAS
-//        ^   ^                                       |                       | 5 s
-//        |   +---------(P2/P3: cambia color)---------+                       v
+//        ^   ^                                                                | 5 s
+//        |   +-------------------(P1: parada manual, STOP)---------------+    v
 //        +-----------------------(P1)----------- FIN <--(3 min)---------- EN_MARCHA
 //
+//  P2/P3 en cualquier estado salvo EN_MARCHA (motores parados) -> cambia color -> SINCRONIZANDO
 //  SINCRONIZANDO y ESPERANDO_INICIO equivalen al estado IDLE de la FSM de Python.
 typedef enum {
   SINCRONIZANDO,     // envia RESET + colores a Python hasta que los confirma
-  ESPERANDO_INICIO,  // colores sincronizados, esperando P1 (P2/P3 cambian los colores)
-  CUENTA_ATRAS,      // 5 s de espera reglamentaria con el LED rojo parpadeando
-  EN_MARCHA,         // se aplican las referencias de Python (envia START al entrar)
+  ESPERANDO_INICIO,  // colores sincronizados, esperando P1
+  CUENTA_ATRAS,      // 5 s de espera reglamentaria con el LED rojo parpadeando (P2/P3 la cancelan)
+  EN_MARCHA,         // se aplican las referencias de Python (envia START al entrar; P1 = parada)
   FIN                // tiempo de partida agotado, motores parados (envia RESET)
 } EstadoRobot;
 
